@@ -117,7 +117,8 @@ def check_isbn_on_hkpl(isbn):
                 not_found_triggers = [
                     "No record found",
                     "沒有找到符合的紀錄",
-                    "系統建議使用",  # HKPL Chinese auto-suggest trigger
+                    "沒有符合的檢索結果",  # ADDED: Catches the specific empty search page text
+                    "系統建議使用",          # HKPL Chinese auto-suggest trigger
                     "System recommends", # HKPL English auto-suggest trigger
                     f"沒有符合{isbn}的檢索結果",
                     f"No results match {isbn}"
@@ -227,6 +228,9 @@ if st.session_state.df_data is not None:
     
     # Map raw value status items for clean rendering in the selected language
     display_df[L["col_status"]] = display_df[L["col_status"]].replace({"Unfinished": L["lbl_unfinished"]})
+    
+    # Shifting the display index to start at 1 instead of 0 for better readability
+    display_df.index = display_df.index + 1
     
     st.dataframe(display_df, height=350, use_container_width=True)
 
