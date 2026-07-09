@@ -18,14 +18,12 @@ LANG_DICT = {
         "btn_resume": "▶️ Resume Verification",
         "btn_stop": "⏸️ Stop / Pause Safely",
         "btn_reset": "🔄 Clear & Upload New File",
-        "btn_retry_errors": "🔄 Retry Timeout Errors",
         "preview_title": "📊 Real-Time Verification Progress Dashboard",
         "err_limit": "❌ Error: The file contains more than 1,000 entries. Please reduce the size and re-upload.",
         "m_total": "Total Rows",
         "m_found": "Found Titles",
         "m_notfound": "Not Found",
         "m_unfinished": "Unfinished Rows",
-        "m_error": "Timeout Errors",
         "download_lbl": "📥 Download Updated Excel Spreadsheet",
         "status_idle": "Status: System Ready.",
         "status_running": "Status: Processing records... You can click 'Stop' anytime.",
@@ -34,6 +32,7 @@ LANG_DICT = {
         "col_status": "In HKPL Catalog",
         "col_title": "HKPL Extracted Title",
         "lbl_unfinished": "Unfinished",
+        "lbl_retrying": "Retrying Connection...",
         "lbl_na": "N/A"
     },
     "ZH": {
@@ -46,14 +45,12 @@ LANG_DICT = {
         "btn_resume": "▶️ 繼續未完成的比對任務",
         "btn_stop": "⏸️ 安全停止 / 暫停",
         "btn_reset": "🔄 清除數據並重新上傳",
-        "btn_retry_errors": "🔄 重新測試連線逾時項目",
         "preview_title": "📊 圖書館數據即時驗證進度儀表板",
         "err_limit": "❌ 錯誤：檔案數據超過 1,000 行上限。請縮減行數後重新上傳。",
         "m_total": "總數據量",
         "m_found": "已尋獲書籍種類",
         "m_notfound": "無館藏",
         "m_unfinished": "未完成行數",
-        "m_error": "連線逾時錯誤",
         "download_lbl": "📥 下載更新後的 Excel 數據報告",
         "status_idle": "狀態：系統準備就緒。",
         "status_running": "狀態：正在進行線上比對... 您可以隨時點擊「暫停」。",
@@ -62,12 +59,13 @@ LANG_DICT = {
         "col_status": "香港公共圖書館館藏",
         "col_title": "圖書館登記書籍名稱",
         "lbl_unfinished": "未完成",
+        "lbl_retrying": "連線重試中...",
         "lbl_na": "無數據"
     }
 }
 
 # --- INITIALIZATION & CONFIGURATION ---
-st.set_page_config(page_title="HKPL Matcher PRO", page_icon="📚", layout="wide")
+st.set_page_config(page_title="HKPL Matcher", page_icon="📚", layout="wide")
 
 # Persistent state initialization
 if "current_index" not in st.session_state:
@@ -86,7 +84,7 @@ L = LANG_DICT["ZH"] if selected_lang == "繁體中文" else LANG_DICT["EN"]
 st.title(L["title"])
 st.markdown("---")
 
-# --- UTILITY SCRAPING FUNCTIONS WITH AUTO-RETRY ---
+# --- UTILITY SCRAPING FUNCTIONS ---
 def parse_hkpl_title(html_content):
     """Parses standard HKPL WebCat HTML strings to extract titles if present."""
     soup = BeautifulSoup(html_content, 'html.parser')
@@ -102,12 +100,12 @@ def parse_hkpl_title(html_content):
     return "Found (Title text unparsed)"
 
 def check_isbn_on_hkpl(isbn):
-    """Executes requests with an automated loop fallback handling connection time-outs."""
+    """Executes a short request attempt. Infinite retries are handled safely by the Streamlit UI loop."""
     url = f"https://webcat.hkpl.gov.hk/search/query?term_1={isbn}&field_1=isbn&theme=WEB"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
-    max_retries = 3
-    for attempt in range(max_retries):
+    # Internal fast retry for quick blips
+    for attempt in range(2):
         try:
             response = requests.get(url, headers=headers, timeout=7)
             if response.status_code == 200:
@@ -117,9 +115,9 @@ def check_isbn_on_hkpl(isbn):
                 not_found_triggers = [
                     "No record found",
                     "沒有找到符合的紀錄",
-                    "沒有符合的檢索結果",  # ADDED: Catches the specific empty search page text
-                    "系統建議使用",          # HKPL Chinese auto-suggest trigger
-                    "System recommends", # HKPL English auto-suggest trigger
+                    "沒有符合的檢索結果",  
+                    "系統建議使用",          
+                    "System recommends", 
                     f"沒有符合{isbn}的檢索結果",
                     f"No results match {isbn}"
                 ]
@@ -131,12 +129,9 @@ def check_isbn_on_hkpl(isbn):
                     return "Yes", extracted_title
                     
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
-            if attempt < max_retries - 1:
-                time.sleep(2)  # Wait before triggering retry sequence
-                continue
-            else:
-                return "Error (Timeout)", L["lbl_na"]
-                
+            time.sleep(2)
+            continue
+            
     return "Error", L["lbl_na"]
 
 # --- CORE FILE MANAGEMENT LAYERS ---
@@ -205,16 +200,14 @@ if st.session_state.df_data is not None:
     total_count = len(df)
     found_count = int((df["hkpl_status"] == "Yes").sum())
     notfound_count = int((df["hkpl_status"] == "No").sum())
-    error_count = int(df["hkpl_status"].str.contains("Error", na=False).sum())
-    unfinished_count = int((df["hkpl_status"] == "Unfinished").sum())
+    unfinished_count = int((df["hkpl_status"] == "Unfinished").sum()) + int((df["hkpl_status"] == L["lbl_retrying"]).sum()) + int(df["hkpl_status"].str.contains("Error", na=False).sum())
     
     st.markdown(f"### {L['preview_title']}")
-    m1, m2, m3, m4, m5 = st.columns(5)
+    m1, m2, m3, m4 = st.columns(4)
     m1.metric(L["m_total"], total_count)
     m2.metric(L["m_found"], found_count)
     m3.metric(L["m_notfound"], notfound_count)
-    m4.metric(L["m_error"], error_count)
-    m5.metric(L["m_unfinished"], unfinished_count)
+    m4.metric(L["m_unfinished"], unfinished_count)
     
     # Visible Progress Tracking Bar
     prog_pct = float(st.session_state.current_index / total_count) if total_count > 0 else 0
@@ -239,8 +232,11 @@ if st.session_state.df_data is not None:
         idx = st.session_state.current_index
         
         if idx < total_count:
-            # Skip rows that are already processed (useful for retrying errors)
-            if df.at[idx, "hkpl_status"] != "Unfinished":
+            current_status = str(df.at[idx, "hkpl_status"])
+            
+            # Skip rows that are already completed. 
+            # ADDED: explicit check for "Error" to catch leftover strings from old sessions!
+            if current_status not in ["Unfinished", L["lbl_retrying"]] and "Error" not in current_status:
                 st.session_state.current_index += 1
                 st.rerun()
             else:
@@ -250,60 +246,53 @@ if st.session_state.df_data is not None:
                 if not clean_isbn or clean_isbn.lower() == 'nan' or len(clean_isbn) < 8:
                     df.at[idx, "hkpl_status"] = "Invalid ISBN"
                     df.at[idx, "hkpl_title"] = L["lbl_na"]
+                    st.session_state.current_index += 1
+                    st.session_state.df_data = df
+                    st.rerun()
                 else:
-                    # Execution of the live verification request script block
                     status_res, title_res = check_isbn_on_hkpl(clean_isbn)
-                    df.at[idx, "hkpl_status"] = status_res
-                    df.at[idx, "hkpl_title"] = title_res
-                
-                # Increment tracking counters
-                st.session_state.current_index += 1
-                st.session_state.df_data = df
-                
-                # Polite scraping delay pause to guard against server resource locks
-                time.sleep(1.1)
-                st.rerun()
+                    
+                    if status_res == "Error":
+                        # INFINITE RETRY LOOP: 
+                        # We update the UI to show it's retrying, but we DO NOT increment current_index.
+                        # This forces Streamlit to re-process this exact row on the next rerun indefinitely!
+                        df.at[idx, "hkpl_status"] = L["lbl_retrying"]
+                        st.session_state.df_data = df
+                        time.sleep(2)
+                        st.rerun()
+                    else:
+                        # SUCCESS: Record data, increment index, and move forward!
+                        df.at[idx, "hkpl_status"] = status_res
+                        df.at[idx, "hkpl_title"] = title_res
+                        
+                        st.session_state.current_index += 1
+                        st.session_state.df_data = df
+                        
+                        time.sleep(1.1)
+                        st.rerun()
         else:
             st.session_state.run_state = "COMPLETED"
             st.rerun()
 
-    # --- DOWNSTREAM EXCEL EXPORT & RETRY WORKFLOW MANAGEMENT ---
+    # --- DOWNSTREAM EXCEL EXPORT WORKFLOW MANAGEMENT ---
     if st.session_state.run_state in ["PAUSED", "COMPLETED"]:
         st.markdown("---")
         
-        col_act1, col_act2 = st.columns(2)
+        export_df = df.rename(columns={
+            "hkpl_status": L["col_status"],
+            "hkpl_title": L["col_title"]
+        })
+        export_df[L["col_status"]] = export_df[L["col_status"]].replace({"Unfinished": L["lbl_unfinished"]})
         
-        # Action 1: Reconnect & Retry Errors (Only if run is completed and errors exist)
-        with col_act1:
-            if st.session_state.run_state == "COMPLETED" and error_count > 0:
-                if st.button(L["btn_retry_errors"], type="primary"):
-                    # Find all error rows and set them back to Unfinished
-                    error_mask = df["hkpl_status"].str.contains("Error", na=False)
-                    df.loc[error_mask, "hkpl_status"] = "Unfinished"
-                    
-                    # Reset the index loop back to the beginning so it sweeps through and catches them
-                    st.session_state.df_data = df
-                    st.session_state.current_index = 0
-                    st.session_state.run_state = "RUNNING"
-                    st.rerun()
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            export_df.to_excel(writer, index=False)
+        processed_bytes = output.getvalue()
         
-        # Action 2: Download the final excel sheet
-        with col_act2:
-            export_df = df.rename(columns={
-                "hkpl_status": L["col_status"],
-                "hkpl_title": L["col_title"]
-            })
-            export_df[L["col_status"]] = export_df[L["col_status"]].replace({"Unfinished": L["lbl_unfinished"]})
-            
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                export_df.to_excel(writer, index=False)
-            processed_bytes = output.getvalue()
-            
-            st.download_button(
-                label=L["download_lbl"],
-                data=processed_bytes,
-                file_name="hkpl_checked_library_inventory.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
-            )
+        st.download_button(
+            label=L["download_lbl"],
+            data=processed_bytes,
+            file_name="hkpl_checked_library_inventory.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
