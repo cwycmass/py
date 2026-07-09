@@ -214,10 +214,9 @@ if st.session_state.df_data is not None:
     notfound_count = int((df[L["col_status"]] == "No").sum())
     error_count = int(df[L["col_status"]].str.contains("Error", na=False).sum())
     unfinished_count = int((df[L["col_status"]] == L["lbl_unfinished"]).sum())
-    
-    # Sum up valid copies integers found so far
-    valid_copies_series = df[df[L["col_copies"]].apply(lambda x: isinstance(x, int))]
-    total_copies_found = int(valid_copies_series[L["col_copies"]].sum())
+
+    # Sum up valid copies found so far safely, ignoring text placeholders
+    total_copies_found = int(pd.to_numeric(df[L["col_copies"]], errors='coerce').sum())
     
     st.markdown(f"### {L['preview_title']}")
     m1, m2, m3, m4, m5, m6 = st.columns(6)
