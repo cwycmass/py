@@ -81,9 +81,9 @@ if "df_data" not in st.session_state:
 if "isbn_col_name" not in st.session_state:
     st.session_state.isbn_col_name = ""
 
-# Language Toggle Widget (Sidebar)
-selected_lang = st.sidebar.radio("Language / 語言", ["English", "繁體中文"], index=0)
-L = LANG_DICT["EN"] if selected_lang == "English" else LANG_DICT["ZH"]
+# Language Toggle Widget (Sidebar) - Defaulted to Traditional Chinese
+selected_lang = st.sidebar.radio("Language / 語言", ["繁體中文", "English"], index=0)
+L = LANG_DICT["ZH"] if selected_lang == "繁體中文" else LANG_DICT["EN"]
 
 st.title(L["title"])
 st.markdown("---")
@@ -158,7 +158,9 @@ if uploaded_file is not None and st.session_state.df_data is None:
         # Core data tracking keys remain fixed and unchanging in background memory
         raw_df["hkpl_status"] = "Unfinished"
         raw_df["hkpl_title"] = "N/A"
-        raw_df["hkpl_copies"] = "Unfinished"
+        
+        # Initialize as 'object' so PyArrow allows both strings ("Unfinished") and integers (1, 2, 3...)
+        raw_df["hkpl_copies"] = pd.Series(["Unfinished"] * len(raw_df), dtype=object)
         
         st.session_state.df_data = raw_df
         st.session_state.current_index = 0
