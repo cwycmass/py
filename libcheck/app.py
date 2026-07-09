@@ -131,18 +131,31 @@ def check_isbn_on_hkpl(isbn):
             response = requests.get(url, headers=headers, timeout=7)
             if response.status_code == 200:
                 html = response.text
-                if "No record found" in html or "沒有找到符合的紀錄" in html:
+                
+                # Check for direct "Not Found" messages AND HKPL's auto-suggest fallback warnings
+                not_found_triggers = [
+                    "No record found",
+                    "沒有找到符合的紀錄",
+                    "系統建議使用",  # HKPL Chinese auto-suggest trigger
+                    "System recommends", # HKPL English auto-suggest trigger
+                    f"沒有符合{isbn}的檢索結果",
+                    f"No results match {isbn}"
+                ]
+                
+                if any(trigger in html for trigger in not_found_triggers):
                     return "No", L["lbl_na"], 0
                 else:
                     extracted_title = parse_hkpl_title(html)
                     extracted_copies = parse_hkpl_copies(html)
                     return "Yes", extracted_title, extracted_copies
+                    
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
             if attempt < max_retries - 1:
                 time.sleep(2)  # Wait before triggering retry sequence
                 continue
             else:
                 return "Error (Timeout)", L["lbl_na"], 0
+                
     return "Error", L["lbl_na"], 0
 
 # --- CORE FILE MANAGEMENT LAYERS ---
