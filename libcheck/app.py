@@ -3,112 +3,280 @@ import pandas as pd
 import requests
 import time
 import io
+import re
+from bs4 import BeautifulSoup
 
-# 1. Page Configuration
-st.set_page_config(
-    page_title="HKPL School Library Matcher",
-    page_icon="📚",
-    layout="centered"
-)
+# --- BILINGUAL DICTIONARY SYSTEM ---
+LANG_DICT = {
+    "EN": {
+        "title": "📚 HKPL School Library Catalog Matcher",
+        "lang_select": "🌐 Select Language / 選擇語言",
+        "upload_label": "Step 1: Upload School Library Excel sheet (.xlsx)",
+        "upload_help": "Maximum allowance: 1,000 rows per session.",
+        "select_isbn": "Step 2: Select the column that contains your ISBNs:",
+        "btn_start": "🚀 Start Verification",
+        "btn_resume": "▶️ Resume Verification",
+        "btn_stop": "⏸️ Stop / Pause Safely",
+        "btn_reset": "🔄 Clear & Upload New File",
+        "preview_title": "📊 Real-Time Verification Progress Dashboard",
+        "err_limit": "❌ Error: The file contains more than 1,000 entries. Please reduce the size and re-upload.",
+        "m_total": "Total Rows",
+        "m_found": "Found Titles",
+        "m_copies": "Total Copies",
+        "m_notfound": "Not Found (0 Copies)",
+        "m_unfinished": "Unfinished Rows",
+        "m_error": "Timeout Errors",
+        "download_lbl": "📥 Download Updated Excel Spreadsheet",
+        "status_idle": "Status: System Ready.",
+        "status_running": "Status: Processing records... You can click 'Stop' anytime.",
+        "status_paused": "Status: Interrupted by user. Unfinished rows are preserved.",
+        "status_completed": "Status: 🎉 Task complete! All rows processed.",
+        "col_status": "In HKPL Catalog",
+        "col_title": "HKPL Extracted Title",
+        "col_copies": "HKPL Copies Count",
+        "lbl_unfinished": "Unfinished",
+        "lbl_na": "N/A"
+    },
+    "ZH": {
+        "title": "📚 香港公共圖書館自動批次圖書比對系統",
+        "lang_select": "🌐 Select Language / 選擇語言",
+        "upload_label": "第一步：上傳學校圖書館 Excel 檔案 (.xlsx)",
+        "upload_help": "系統處理上限：每次最多 1,000 行數據。",
+        "select_isbn": "第二步：選擇包含 ISBN 碼的數據欄位：",
+        "btn_start": "🚀 開始自動比對",
+        "btn_resume": "▶️ 繼續未完成的比對任務",
+        "btn_stop": "⏸️ 安全停止 / 暫停",
+        "btn_reset": "🔄 清除數據並重新上傳",
+        "preview_title": "📊 圖書館數據即時驗證進度儀表板",
+        "err_limit": "❌ 錯誤：檔案數據超過 1,000 行上限。請縮減行數後重新上傳。",
+        "m_total": "總數據量",
+        "m_found": "已尋獲書籍種類",
+        "m_copies": "館藏複本總數",
+        "m_notfound": "無館藏 (0 本)",
+        "m_unfinished": "未完成行數",
+        "m_error": "連線逾時錯誤",
+        "download_lbl": "📥 下載更新後的 Excel 數據報告",
+        "status_idle": "狀態：系統準備就緒。",
+        "status_running": "狀態：正在進行線上比對... 您可以隨時點擊「暫停」。",
+        "status_paused": "狀態：已被用戶手動暫停。未完成的行數已妥善保存。",
+        "status_completed": "狀態：🎉 比對工作全部圓滿完成！",
+        "col_status": "香港公共圖書館館藏",
+        "col_title": "圖書館登記書籍名稱",
+        "col_copies": "館藏複本數量",
+        "lbl_unfinished": "未完成",
+        "lbl_na": "無數據"
+    }
+}
 
-# 2. App Styling & Header
-st.title("📚 HKPL Catalog Bulk Matcher")
-st.markdown("""
-This application automates checking whether your school's books are available in the **Hong Kong Public Library (HKPL)** system using their ISBNs.
-""")
+# --- INITIALIZATION & CONFIGURATION ---
+st.set_page_config(page_title="HKPL Matcher PRO", page_icon="📚", layout="wide")
+
+# Persistent state initialization
+if "current_index" not in st.session_state:
+    st.session_state.current_index = 0
+if "run_state" not in st.session_state:
+    st.session_state.run_state = "IDLE"  # IDLE, RUNNING, PAUSED, COMPLETED
+if "df_data" not in st.session_state:
+    st.session_state.df_data = None
+if "isbn_col_name" not in st.session_state:
+    st.session_state.isbn_col_name = ""
+
+# Language Toggle Widget (Sidebar)
+selected_lang = st.sidebar.radio("Language / 語言", ["English", "繁體中文"], index=0)
+L = LANG_DICT["EN"] if selected_lang == "English" else LANG_DICT["ZH"]
+
+st.title(L["title"])
 st.markdown("---")
 
-# 3. File Upload Component
-uploaded_file = st.file_uploader("Step 1: Upload your School Library Excel file (.xlsx)", type=["xlsx"])
+# --- UTILITY SCRAPING FUNCTIONS WITH AUTO-RETRY ---
+def parse_hkpl_title(html_content):
+    """Parses standard HKPL WebCat HTML strings to extract titles if present."""
+    soup = BeautifulSoup(html_content, 'html.parser')
+    for link in soup.find_all('a'):
+        href = link.get('href', '')
+        if 'search/detail' in href or 'query?term' in href:
+            txt = link.get_text(strip=True)
+            if txt and len(txt) > 2:
+                return txt
+    title_element = soup.find(class_="title") or soup.find(class_="bookTitle")
+    if title_element:
+        return title_element.get_text(strip=True)
+    return "Found (Title text unparsed)"
 
-if uploaded_file is not None:
-    try:
-        # Read the Excel sheet
-        df = pd.read_excel(uploaded_file)
-        st.success("Excel file uploaded successfully!")
+def parse_hkpl_copies(html_content):
+    """Uses regular expressions to extract total copies written on the HKPL page."""
+    soup = BeautifulSoup(html_content, 'html.parser')
+    page_text = soup.get_text()
+    
+    # HKPL uses patterns like "全部複本: 12" or "Total Copies: 12"
+    match = re.search(r'(?:全部複本|Total\s+[Cc]opies)[\s:]*(\d+)', page_text)
+    if match:
+        return int(match.group(1))
+    
+    # Fallback to general copy keyword checks
+    match_fallback = re.search(r'(?:複本)[\s:]*(\d+)', page_text)
+    if match_fallback:
+        return int(match_fallback.group(1))
         
-        # Step 2: Let the user select the exact column holding the ISBNs
-        columns = df.columns.tolist()
-        isbn_column = st.selectbox("Step 2: Select the column that contains your ISBNs:", columns)
+    return 1 # Default fallback to 1 copy if the record exists but exact text parsing missed
+
+def check_isbn_on_hkpl(isbn):
+    """Executes requests with an automated loop fallback handling connection time-outs."""
+    url = f"https://webcat.hkpl.gov.hk/search/query?term_1={isbn}&field_1=isbn&theme=WEB"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(url, headers=headers, timeout=7)
+            if response.status_code == 200:
+                html = response.text
+                if "No record found" in html or "沒有找到符合的紀錄" in html:
+                    return "No", L["lbl_na"], 0
+                else:
+                    extracted_title = parse_hkpl_title(html)
+                    extracted_copies = parse_hkpl_copies(html)
+                    return "Yes", extracted_title, extracted_copies
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+            if attempt < max_retries - 1:
+                time.sleep(2)  # Wait before triggering retry sequence
+                continue
+            else:
+                return "Error (Timeout)", L["lbl_na"], 0
+    return "Error", L["lbl_na"], 0
+
+# --- CORE FILE MANAGEMENT LAYERS ---
+uploaded_file = st.file_uploader(L["upload_label"], type=["xlsx"], help=L["upload_help"])
+
+if uploaded_file is not None and st.session_state.df_data is None:
+    raw_df = pd.read_excel(uploaded_file)
+    
+    # 1,000 Rows Strict Enforcer Rule
+    if len(raw_df) > 1000:
+        st.error(L["err_limit"])
+    else:
+        # Prepare tracking columns mapping directly to UI selections
+        raw_df[L["col_status"]] = L["lbl_unfinished"]
+        raw_df[L["col_title"]] = L["lbl_na"]
+        raw_df[L["col_copies"]] = L["lbl_unfinished"]
         
+        st.session_state.df_data = raw_df
+        st.session_state.current_index = 0
+        st.session_state.run_state = "IDLE"
+
+# Reset App State Action Handler
+if st.session_state.df_data is not None:
+    if st.sidebar.button(L["btn_reset"]):
+        st.session_state.df_data = None
+        st.session_state.current_index = 0
+        st.session_state.run_state = "IDLE"
+        st.rerun()
+
+# --- RUN STATE ENGINE ---
+if st.session_state.df_data is not None:
+    df = st.session_state.df_data
+    columns = df.columns.tolist()
+    
+    if st.session_state.isbn_col_name not in columns:
+        st.session_state.isbn_col_name = columns[0]
+        
+    st.session_state.isbn_col_name = st.selectbox(L["select_isbn"], columns, index=columns.index(st.session_state.isbn_col_name))
+    
+    # Action Controller Buttons Layout Setup
+    st.markdown("### Controls")
+    c1, c2, c3 = st.columns(3)
+    
+    with c1:
+        if st.session_state.run_state in ["IDLE", "PAUSED"]:
+            btn_label = L["btn_start"] if st.session_state.current_index == 0 else L["btn_resume"]
+            if st.button(btn_label, type="primary", use_container_width=True):
+                st.session_state.run_state = "RUNNING"
+                st.rerun()
+    with c2:
+        if st.session_state.run_state == "RUNNING":
+            if st.button(L["btn_stop"], type="secondary", use_container_width=True):
+                st.session_state.run_state = "PAUSED"
+                st.rerun()
+                
+    # Display matching alert banners depending on operational modes
+    if st.session_state.run_state == "IDLE":
+        st.info(L["status_idle"])
+    elif st.session_state.run_state == "RUNNING":
+        st.warning(L["status_running"])
+    elif st.session_state.run_state == "PAUSED":
+        st.info(L["status_paused"])
+    elif st.session_state.run_state == "COMPLETED":
+        st.success(L["status_completed"])
+
+    # --- PROGRESS CALCULATION ENGINE & METRICS DASHBOARD ---
+    total_count = len(df)
+    found_count = int((df[L["col_status"]] == "Yes").sum())
+    notfound_count = int((df[L["col_status"]] == "No").sum())
+    error_count = int(df[L["col_status"]].str.contains("Error", na=False).sum())
+    unfinished_count = int((df[L["col_status"]] == L["lbl_unfinished"]).sum())
+    
+    # Sum up valid copies integers found so far
+    valid_copies_series = df[df[L["col_copies"]].apply(lambda x: isinstance(x, int))]
+    total_copies_found = int(valid_copies_series[L["col_copies"]].sum())
+    
+    st.markdown(f"### {L['preview_title']}")
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1.metric(L["m_total"], total_count)
+    m2.metric(L["m_found"], found_count)
+    m3.metric(L["m_copies"], total_copies_found, delta=f"+{total_copies_found}" if total_copies_found > 0 else None)
+    m4.metric(L["m_notfound"], notfound_count)
+    m5.metric(L["m_error"], error_count)
+    m6.metric(L["m_unfinished"], unfinished_count)
+    
+    # Visible Progress Tracking Bar
+    prog_pct = float(st.session_state.current_index / total_count)
+    st.progress(min(prog_pct, 1.0))
+
+    # Real-Time DataFrame Update View
+    st.dataframe(df, height=350, use_container_width=True)
+
+    # --- HIGHLY CONTROLLABLE STEP LOOP PROCESSING SECTION ---
+    if st.session_state.run_state == "RUNNING":
+        idx = st.session_state.current_index
+        
+        if idx < total_count:
+            raw_isbn_val = str(df.iloc[idx][st.session_state.isbn_col_name]).strip()
+            clean_isbn = raw_isbn_val.split('.')[0] if '.' in raw_isbn_val else raw_isbn_val
+            
+            if not clean_isbn or clean_isbn.lower() == 'nan' or len(clean_isbn) < 8:
+                df.at[idx, L["col_status"]] = "Invalid ISBN"
+                df.at[idx, L["col_title"]] = L["lbl_na"]
+                df.at[idx, L["col_copies"]] = 0
+            else:
+                # Execution of the live verification request script block
+                status_res, title_res, copies_res = check_isbn_on_hkpl(clean_isbn)
+                df.at[idx, L["col_status"]] = status_res
+                df.at[idx, L["col_title"]] = title_res
+                df.at[idx, L["col_copies"]] = copies_res
+            
+            # Increment tracking counters
+            st.session_state.current_index += 1
+            st.session_state.df_data = df
+            
+            # Polite scraping delay pause to guard against server resource locks
+            time.sleep(1.1)
+            st.rerun()
+        else:
+            st.session_state.run_state = "COMPLETED"
+            st.rerun()
+
+    # --- DOWNSTREAM EXCEL EXPORT WORKFLOW MANAGEMENT ---
+    if st.session_state.run_state in ["PAUSED", "COMPLETED"]:
         st.markdown("---")
-        st.write("### Preview of Uploaded Data (First 5 Rows)")
-        st.dataframe(df.head())
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False)
+        processed_bytes = output.getvalue()
         
-        # Step 3: Trigger the execution loop
-        if st.button("🚀 Start Automatic HKPL Verification"):
-            results = []
-            
-            # Interactive UI Progress Elements
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            total_books = len(df)
-            
-            # Start timer
-            start_time = time.time()
-            
-            for index, row in df.iterrows():
-                # Clean up the ISBN string (removing trailing decimals or spaces)
-                raw_isbn = str(row[isbn_column]).strip()
-                isbn = raw_isbn.split('.')[0] if '.' in raw_isbn else raw_isbn
-                
-                status_text.text(f"Checking book {index + 1} of {total_books} (ISBN: {isbn})...")
-                
-                # Check for empty/invalid values
-                if not isbn or isbn.lower() == 'nan' or len(isbn) < 9:
-                    results.append("Invalid/Missing ISBN")
-                    progress_bar.progress((index + 1) / total_books)
-                    continue
-                
-                # HKPL Web Catalog Query URL
-                url = f"https://webcat.hkpl.gov.hk/search/query?term_1={isbn}&field_1=isbn&theme=WEB"
-                
-                try:
-                    # Spoof standard browser headers to avoid instant blocking
-                    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-                    response = requests.get(url, headers=headers, timeout=10)
-                    
-                    # Analyze HKPL system response text
-                    if "No record found" in response.text or "沒有找到符合的紀錄" in response.text:
-                        results.append("No")
-                    else:
-                        results.append("Yes")
-                        
-                except Exception:
-                    results.append("Error Connection Timeout")
-                
-                # Critical safety pause: respect HKPL servers so your app's IP doesn't get banned
-                time.sleep(1.2)
-                
-                # Progress Update
-                progress_bar.progress((index + 1) / total_books)
-            
-            # Calculate metrics
-            elapsed_time = round(time.time() - start_time, 1)
-            status_text.success(f"🎉 Verification Complete in {elapsed_time} seconds!")
-            
-            # Inject results into a copy of the dataframe
-            output_df = df.copy()
-            output_df['In HKPL Catalog'] = results
-            
-            # Show interactive final results preview
-            st.markdown("---")
-            st.write("### Verification Results Preview")
-            st.dataframe(output_df.head(10))
-            
-            # Re-compile data stream back into an downloadable Excel spreadsheet
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                output_df.to_excel(writer, index=False)
-            processed_data = output.getvalue()
-            
-            # Provide Browser Download Button
-            st.download_button(
-                label="📥 Download Updated Excel Sheet",
-                data=processed_data,
-                file_name="hkpl_checked_library_list.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-            
-    except Exception as e:
-        st.error(f"An error occurred reading the file: {e}")
+        st.download_button(
+            label=L["download_lbl"],
+            data=processed_bytes,
+            file_name="hkpl_checked_library_inventory.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
