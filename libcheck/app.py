@@ -155,10 +155,10 @@ if uploaded_file is not None and st.session_state.df_data is None:
     if len(raw_df) > 1000:
         st.error(L["err_limit"])
     else:
-        # Prepare tracking columns mapping directly to UI selections
-        raw_df[L["col_status"]] = L["lbl_unfinished"]
-        raw_df[L["col_title"]] = L["lbl_na"]
-        raw_df[L["col_copies"]] = L["lbl_unfinished"]
+        # Core data tracking keys remain fixed and unchanging in background memory
+        raw_df["hkpl_status"] = "Unfinished"
+        raw_df["hkpl_title"] = "N/A"
+        raw_df["hkpl_copies"] = "Unfinished"
         
         st.session_state.df_data = raw_df
         st.session_state.current_index = 0
@@ -175,7 +175,7 @@ if st.session_state.df_data is not None:
 # --- RUN STATE ENGINE ---
 if st.session_state.df_data is not None:
     df = st.session_state.df_data
-    columns = df.columns.tolist()
+    columns = [col for col in df.columns.tolist() if col not in ["hkpl_status", "hkpl_title", "hkpl_copies"]]
     
     if st.session_state.isbn_col_name not in columns:
         st.session_state.isbn_col_name = columns[0]
@@ -210,13 +210,13 @@ if st.session_state.df_data is not None:
 
     # --- PROGRESS CALCULATION ENGINE & METRICS DASHBOARD ---
     total_count = len(df)
-    found_count = int((df[L["col_status"]] == "Yes").sum())
-    notfound_count = int((df[L["col_status"]] == "No").sum())
-    error_count = int(df[L["col_status"]].str.contains("Error", na=False).sum())
-    unfinished_count = int((df[L["col_status"]] == L["lbl_unfinished"]).sum())
-
-    # Sum up valid copies found so far safely, ignoring text placeholders
-    total_copies_found = int(pd.to_numeric(df[L["col_copies"]], errors='coerce').sum())
+    found_count = int((df["hkpl_status"] == "Yes").sum())
+    notfound_count = int((df["hkpl_status"] == "No").sum())
+    error_count = int(df["hkpl_status"].str.contains("Error", na=False).sum())
+    unfinished_count = int((df["hkpl_status"] == "Unfinished").sum())
+    
+    # Safely calculate total copies found so far, ignoring text placeholders
+    total_copies_found = int(pd.to_numeric(df["hkpl_copies"], errors='coerce').sum())
     
     st.markdown(f"### {L['preview_title']}")
     m1, m2, m3, m4, m5, m6 = st.columns(6)
@@ -231,8 +231,18 @@ if st.session_state.df_data is not None:
     prog_pct = float(st.session_state.current_index / total_count)
     st.progress(min(prog_pct, 1.0))
 
-    # Real-Time DataFrame Update View
-    st.dataframe(df, height=350, use_container_width=True)
+    # Real-Time Data View: Rename background columns to active language headers on the fly
+    display_df = df.rename(columns={
+        "hkpl_status": L["col_status"],
+        "hkpl_title": L["col_title"],
+        "hkpl_copies": L["col_copies"]
+    })
+    
+    # Map raw value status items for clean rendering in the selected language
+    display_df[L["col_status"]] = display_df[L["col_status"]].replace({"Unfinished": L["lbl_unfinished"]})
+    display_df[L["col_copies"]] = display_df[L["col_copies"]].replace({"Unfinished": L["lbl_unfinished"]})
+    
+    st.dataframe(display_df, height=350, use_container_width=True)
 
     # --- HIGHLY CONTROLLABLE STEP LOOP PROCESSING SECTION ---
     if st.session_state.run_state == "RUNNING":
@@ -243,15 +253,15 @@ if st.session_state.df_data is not None:
             clean_isbn = raw_isbn_val.split('.')[0] if '.' in raw_isbn_val else raw_isbn_val
             
             if not clean_isbn or clean_isbn.lower() == 'nan' or len(clean_isbn) < 8:
-                df.at[idx, L["col_status"]] = "Invalid ISBN"
-                df.at[idx, L["col_title"]] = L["lbl_na"]
-                df.at[idx, L["col_copies"]] = 0
+                df.at[idx, "hkpl_status"] = "Invalid ISBN"
+                df.at[idx, "hkpl_title"] = L["lbl_na"]
+                df.at[idx, "hkpl_copies"] = 0
             else:
                 # Execution of the live verification request script block
                 status_res, title_res, copies_res = check_isbn_on_hkpl(clean_isbn)
-                df.at[idx, L["col_status"]] = status_res
-                df.at[idx, L["col_title"]] = title_res
-                df.at[idx, L["col_copies"]] = copies_res
+                df.at[idx, "hkpl_status"] = status_res
+                df.at[idx, "hkpl_title"] = title_res
+                df.at[idx, "hkpl_copies"] = copies_res
             
             # Increment tracking counters
             st.session_state.current_index += 1
@@ -267,9 +277,19 @@ if st.session_state.df_data is not None:
     # --- DOWNSTREAM EXCEL EXPORT WORKFLOW MANAGEMENT ---
     if st.session_state.run_state in ["PAUSED", "COMPLETED"]:
         st.markdown("---")
+        
+        # Format the exported excel sheet headers to current language parameters
+        export_df = df.rename(columns={
+            "hkpl_status": L["col_status"],
+            "hkpl_title": L["col_title"],
+            "hkpl_copies": L["col_copies"]
+        })
+        export_df[L["col_status"]] = export_df[L["col_status"]].replace({"Unfinished": L["lbl_unfinished"]})
+        export_df[L["col_copies"]] = export_df[L["col_copies"]].replace({"Unfinished": L["lbl_unfinished"]})
+        
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False)
+            export_df.to_excel(writer, index=False)
         processed_bytes = output.getvalue()
         
         st.download_button(
